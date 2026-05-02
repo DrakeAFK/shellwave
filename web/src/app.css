@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #000000;
+  --color-foreground: #ededed;
+  --color-accent: #10b981;
+  --color-muted: #111111;
+  --color-border: #222222;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+@layer base {
+  body {
+    @apply bg-background text-foreground font-mono antialiased;
+  }
+}
+
+.xterm-container {
+  @apply w-full h-full bg-black rounded-lg overflow-hidden border border-border;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-muted rounded-full hover:bg-border;
+}

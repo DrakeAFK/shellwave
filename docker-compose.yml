@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  shellwave:
+    build: .
+    image: shellwave:latest
+    container_name: shellwave
+    restart: unless-stopped
+    ports:
+      # Defaults to binding only on localhost.
+      # Change to "4000:4000" if you are fronting this with a reverse proxy
+      # or want to expose it to your network (not recommended without TLS).
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - ./data:/data
+    environment:
+      - SHELLWAVE_DATA=/data/shellwave.db
+      # Optional: configure TLS
+      # - SHELLWAVE_TLS_CERT=/data/cert.pem
+      # - SHELLWAVE_TLS_KEY=/data/key.pem
+      
+      # Optional: allow public SSH hosts
+      # - SHELLWAVE_ALLOW_PUBLIC_HOSTS=true
+      
+      # Optional: add extra allowed internal hosts/networks
+      # - SHELLWAVE_HOST_ALLOWLIST_EXTRA=192.168.1.0/24,my-server.local

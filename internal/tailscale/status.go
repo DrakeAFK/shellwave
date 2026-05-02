@@ -101,11 +101,20 @@ func ParseStatus(data []byte) (Status, error) {
 
 	self := toPeer(raw.Self)
 	status := Status{Available: true, Self: &self}
+
+	// Include the Tailscale node where ShellWave is running.
+	// In Docker/server deployments, this is useful because the browser client
+	// may be on a different Tailscale device.
+	if self.ID != "" || self.TailscaleIP != "" || self.DNSName != "" || self.HostName != "" {
+		status.Devices = append(status.Devices, toDevice(self))
+	}
+
 	for _, peer := range raw.Peer {
 		p := toPeer(peer)
 		status.Peers = append(status.Peers, p)
 		status.Devices = append(status.Devices, toDevice(p))
 	}
+
 	return status, nil
 }
 

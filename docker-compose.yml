@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   shellwave:
     build: .
@@ -7,10 +5,10 @@ services:
     container_name: shellwave
     restart: unless-stopped
     ports:
-      # Defaults to binding only on localhost.
-      # Change to "4000:4000" if you are fronting this with a reverse proxy
-      # or want to expose it to your network (not recommended without TLS).
-      - "127.0.0.1:4000:4000"
+      # Defaults to binding only on localhost. Set SHELLWAVE_BIND to your
+      # Tailscale IP if you want direct tailnet access, e.g.:
+      # SHELLWAVE_BIND=100.80.71.61 docker compose up -d
+      - "${SHELLWAVE_BIND:-127.0.0.1}:4000:4000"
     volumes:
       - ./data:/data
     environment:

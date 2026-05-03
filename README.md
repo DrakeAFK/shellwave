@@ -18,7 +18,13 @@ The easiest way to run ShellWave is with Docker Compose. This ensures data persi
 docker-compose up -d
 ```
 
-By default, the `docker-compose.yml` binds to `127.0.0.1:4000`. If you are putting this behind a reverse proxy (like Caddy, Nginx, or Tailscale Serve), you can adjust the port mapping.
+By default, the `docker-compose.yml` binds to `127.0.0.1:4000`. If you want direct access from another Tailscale device, set `SHELLWAVE_BIND` to this server's Tailscale IP before starting Compose:
+
+```sh
+SHELLWAVE_BIND=100.80.71.61 docker compose up -d
+```
+
+Then open `http://dafk-lab-001:4000` or `http://100.80.71.61:4000` from your other tailnet devices. If you are putting this behind a reverse proxy, keep the default localhost bind and proxy to `127.0.0.1:4000`.
 
 ### Local Development
 

@@ -11,6 +11,9 @@ services:
       - "${SHELLWAVE_BIND:-127.0.0.1}:4000:4000"
     volumes:
       - ./data:/data
+      # Allows the container's tailscale CLI to query the host tailscaled daemon
+      # for tailnet import. The import parser still hides this ShellWave host.
+      - /var/run/tailscale:/var/run/tailscale
     environment:
       - SHELLWAVE_DATA=/data/shellwave.db
       # Optional: configure TLS

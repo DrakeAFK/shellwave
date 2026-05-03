@@ -13,7 +13,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /server ./cmd/server
 
 FROM alpine:latest
-RUN apk --no-cache add openssh-client wget && \
+RUN apk --no-cache add openssh-client tailscale wget && \
   addgroup -S appgroup && \
   adduser -S appuser -G appgroup && \
   mkdir -p /data /app && \

@@ -13,13 +13,8 @@ services:
       - "127.0.0.1:4000:4000"
     volumes:
       - ./data:/data
-    extra_hosts:
-      # Lets the container SSH back to the Docker host when importing this
-      # server from Tailscale.
-      - "host.docker.internal:host-gateway"
     environment:
       - SHELLWAVE_DATA=/data/shellwave.db
-      - SHELLWAVE_SELF_SSH_HOST=host.docker.internal
       # Optional: configure TLS
       # - SHELLWAVE_TLS_CERT=/data/cert.pem
       # - SHELLWAVE_TLS_KEY=/data/key.pem

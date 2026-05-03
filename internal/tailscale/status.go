@@ -72,7 +72,6 @@ func LocalStatus(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	applySelfSSHHost(&status, selfSSHHost())
 	return status, nil
 }
 
@@ -107,7 +106,7 @@ func ParseStatus(data []byte) (Status, error) {
 	// In Docker/server deployments, this is useful because the browser client
 	// may be on a different Tailscale device.
 	if self.ID != "" || self.TailscaleIP != "" || self.DNSName != "" || self.HostName != "" {
-		status.Devices = append(status.Devices, toSelfDevice(self, defaultSelfSSHHost))
+		status.Devices = append(status.Devices, toDevice(self))
 	}
 
 	for _, peer := range raw.Peer {
@@ -117,29 +116,6 @@ func ParseStatus(data []byte) (Status, error) {
 	}
 
 	return status, nil
-}
-
-const defaultSelfSSHHost = "127.0.0.1"
-
-func selfSSHHost() string {
-	host := strings.TrimSpace(os.Getenv("SHELLWAVE_SELF_SSH_HOST"))
-	if host == "" {
-		return defaultSelfSSHHost
-	}
-	return host
-}
-
-func applySelfSSHHost(status *Status, host string) {
-	if status == nil || status.Self == nil || strings.TrimSpace(host) == "" {
-		return
-	}
-	selfID := devices.NewID(status.Self.ID, status.Self.DNSName, status.Self.TailscaleIP)
-	for i := range status.Devices {
-		if status.Devices[i].ID == selfID {
-			status.Devices[i].Host = strings.TrimSpace(host)
-			return
-		}
-	}
 }
 
 func toPeer(raw rawPeer) Peer {
@@ -183,12 +159,4 @@ func toDevice(peer Peer) devices.Device {
 		Tags:        peer.Tags,
 		OS:          peer.OS,
 	})
-}
-
-func toSelfDevice(peer Peer, host string) devices.Device {
-	device := toDevice(peer)
-	if strings.TrimSpace(host) != "" {
-		device.Host = strings.TrimSpace(host)
-	}
-	return device
 }

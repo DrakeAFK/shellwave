@@ -714,7 +714,7 @@
                   <div class="text-[10px] text-muted-foreground font-mono">ssh -t {selectedDevice.user}@{deviceHost(selectedDevice)}</div>
                 </div>
                 <div class="flex-1 min-h-0">
-                  {#key `${selectedDevice.id}:${selectedDevice.user}:${selectedDevice.port || 22}:${selectedDevice.authMode || 'password'}:${selectedDevice.keyPath || ''}`}
+                  {#key `${selectedDevice.id}:${deviceHost(selectedDevice)}:${selectedDevice.user}:${selectedDevice.port || 22}:${selectedDevice.authMode || 'password'}:${selectedDevice.keyPath || ''}`}
                     <Terminal
                       host={deviceHost(selectedDevice)}
                       user={selectedDevice.user}
@@ -906,7 +906,7 @@ exit {commandResult.exitCode}{:else}Command output will appear here.{/if}</pre>
                 {#if !tailscaleStatus}
                   Checking local CLI...
                 {:else if tailscaleStatus.available}
-                  Active with {(tailscaleStatus.devices || []).length} peer{(tailscaleStatus.devices || []).length === 1 ? '' : 's'} discovered.
+                  Active with {(tailscaleStatus.devices || []).length} device{(tailscaleStatus.devices || []).length === 1 ? '' : 's'} discovered.
                 {:else}
                   {tailscaleStatus.message || 'Tailscale is not available.'}
                 {/if}

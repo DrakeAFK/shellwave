@@ -20,6 +20,8 @@ docker-compose up -d
 
 By default, the `docker-compose.yml` binds to `127.0.0.1:4000`. If you are putting this behind a reverse proxy (like Caddy, Nginx, or Tailscale Serve), you can adjust the port mapping.
 
+When you import the Tailscale machine that is running ShellWave, the backend must SSH from ShellWave back to the host server. Direct installs use `127.0.0.1` for that self connection. The Docker Compose setup maps `host.docker.internal` to the Docker host and sets `SHELLWAVE_SELF_SSH_HOST=host.docker.internal` so the container can reach the host's SSH daemon.
+
 ### Local Development
 
 1. Run the backend: `make dev-server`
@@ -66,6 +68,7 @@ cp ./data/shellwave.db ./shellwave-backup.db
 ## Troubleshooting
 
 - **Tailscale Import Fails**: The Go backend needs access to the `tailscale` CLI binary. If running in Docker, you may need to mount the tailscale socket or use the manual device addition instead.
+- **Imported Host Server Won't Connect**: ShellWave opens SSH connections from the backend process, not from your browser. If ShellWave runs directly on the host, the imported local Tailscale machine uses `127.0.0.1` for SSH. If it runs in Docker, use the provided Compose `host.docker.internal` mapping or set `SHELLWAVE_SELF_SSH_HOST` to an address the container can use to reach the host SSH server.
 - **WebSocket Disconnects instantly**: If you are using a reverse proxy (Nginx, Traefik, Caddy), ensure WebSocket upgrade headers are properly forwarded.
 - **SSH Auth Fails**: If using SSH agent forwarding, ensure your agent is running and accessible to the backend process. 
 - **Docker Compose Permission Denied**: The Docker container runs as a non-root user (`appuser`). Ensure the `./data` directory is writable by the container.

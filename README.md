@@ -76,7 +76,7 @@ cp ./data/shellwave.db ./shellwave-backup.db
 - **Tailscale Import Fails**: The Go backend needs access to the `tailscale` CLI binary and the host `tailscaled` socket. Docker Compose installs the CLI and mounts `/var/run/tailscale` by default. If import still fails, verify that `docker exec shellwave tailscale status --json` works on the server.
 - **WebSocket Disconnects instantly**: If you are using a reverse proxy (Nginx, Traefik, Caddy), ensure WebSocket upgrade headers are properly forwarded.
 - **SSH Auth Fails**: If using SSH agent forwarding, ensure your agent is running and accessible to the backend process. 
-- **Docker Compose Permission Denied**: The Docker container runs as a non-root user (`appuser`). Ensure the `./data` directory is writable by the container.
+- **Docker Compose Permission Denied**: The container fixes `/data` ownership on startup before dropping to the non-root `appuser`. If you still see SQLite readonly errors, verify the host `./data` mount allows ownership changes and is not mounted read-only.
 
 ## HTTPS / TLS
 

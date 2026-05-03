@@ -13,7 +13,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /server ./cmd/server
 
 FROM alpine:latest
-RUN apk --no-cache add openssh-client tailscale wget && \
+RUN apk --no-cache add openssh-client su-exec tailscale wget && \
   addgroup -S appgroup && \
   adduser -S appuser -G appgroup && \
   mkdir -p /data /app && \
@@ -22,8 +22,8 @@ RUN apk --no-cache add openssh-client tailscale wget && \
 WORKDIR /app
 COPY --from=builder /server .
 COPY --from=web-builder /web/dist ./web/dist
-
-USER appuser
+COPY docker-entrypoint.sh .
+RUN chmod +x ./docker-entrypoint.sh
 
 ENV SHELLWAVE_DATA=/data/shellwave.db
 
@@ -32,4 +32,5 @@ HEALTHCHECK --interval=30s --timeout=3s \
 
 EXPOSE 4000
 
+ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["./server", "-addr", ":4000", "-static", "./web/dist", "-data", "/data/shellwave.db"]

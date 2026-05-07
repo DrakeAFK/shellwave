@@ -16,11 +16,15 @@ func TestParseStatus(t *testing.T) {
 	if !status.Available {
 		t.Fatal("expected available status")
 	}
-	if len(status.Devices) != 1 {
-		t.Fatalf("expected one device, got %d", len(status.Devices))
+	if len(status.Devices) != 2 {
+		t.Fatalf("expected self plus one peer device, got %d", len(status.Devices))
 	}
-	device := status.Devices[0]
-	if device.Name != "server" || device.Host != "server.tail.ts.net" || device.TailscaleIP != "100.64.0.20" {
+	self := status.Devices[0]
+	if self.Name != "workstation" || self.Host != "100.64.0.10" || self.MagicDNS != "work.tail.ts.net" {
+		t.Fatalf("unexpected self device: %#v", self)
+	}
+	device := status.Devices[1]
+	if device.Name != "server" || device.Host != "100.64.0.20" || device.MagicDNS != "server.tail.ts.net" || device.TailscaleIP != "100.64.0.20" {
 		t.Fatalf("unexpected device: %#v", device)
 	}
 	if device.Source != "tailscale" || !device.Online || device.OS != "linux" {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	sshlib "golang.org/x/crypto/ssh"
@@ -34,37 +35,10 @@ func Run(ctx context.Context, cfg RunConfig) (RunResult, error) {
 		cfg.Timeout = 15 * time.Second
 	}
 
-	resultCh := make(chan runOutcome, 1)
-	go func() {
-		result, err := run(cfg)
-		resultCh <- runOutcome{result: result, err: err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return RunResult{ExitCode: -1}, ctx.Err()
-	case outcome := <-resultCh:
-		return outcome.result, outcome.err
-	}
+	return run(ctx, cfg)
 }
 
-func RunPassword(ctx context.Context, user, host string, port int, password, command string, timeout time.Duration) (RunResult, error) {
-	return Run(ctx, RunConfig{
-		User:    user,
-		Host:    host,
-		Port:    port,
-		Auth:    AuthConfig{Type: "password", Password: password},
-		Command: command,
-		Timeout: timeout,
-	})
-}
-
-type runOutcome struct {
-	result RunResult
-	err    error
-}
-
-func run(cfg RunConfig) (RunResult, error) {
+func run(ctx context.Context, cfg RunConfig) (RunResult, error) {
 	if cfg.HostKeyCallback == nil {
 		return RunResult{ExitCode: -1}, errors.New("SSH host key callback is required")
 	}
@@ -78,10 +52,19 @@ func run(cfg RunConfig) (RunResult, error) {
 		HostKeyCallback: cfg.HostKeyCallback,
 		Timeout:         cfg.Timeout,
 	}
-	client, err := sshlib.Dial("tcp", fmt.Sprintf("%s:%d", cfg.Host, cfg.Port), clientConfig)
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	dialer := net.Dialer{Timeout: cfg.Timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return RunResult{ExitCode: -1}, err
 	}
+
+	sshConn, chans, reqs, err := sshlib.NewClientConn(conn, addr, clientConfig)
+	if err != nil {
+		_ = conn.Close()
+		return RunResult{ExitCode: -1}, err
+	}
+	client := sshlib.NewClient(sshConn, chans, reqs)
 	defer client.Close()
 
 	session, err := client.NewSession()
@@ -95,16 +78,28 @@ func run(cfg RunConfig) (RunResult, error) {
 	session.Stdout = &stdout
 	session.Stderr = &stderr
 
-	err = session.Run(cfg.Command)
+	runCh := make(chan error, 1)
+	go func() {
+		runCh <- session.Run(cfg.Command)
+	}()
+
+	var runErr error
+	select {
+	case <-ctx.Done():
+		_ = session.Close()
+		_ = client.Close()
+		return RunResult{ExitCode: -1}, ctx.Err()
+	case runErr = <-runCh:
+	}
 	result := RunResult{Stdout: stdout.String(), Stderr: stderr.String()}
-	if err != nil {
+	if runErr != nil {
 		var exitErr *sshlib.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(runErr, &exitErr) {
 			result.ExitCode = exitErr.ExitStatus()
 			return result, nil
 		}
 		result.ExitCode = -1
-		return result, err
+		return result, runErr
 	}
 	return result, nil
 }

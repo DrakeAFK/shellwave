@@ -101,6 +101,9 @@ func ParseStatus(data []byte) (Status, error) {
 
 	self := toPeer(raw.Self)
 	status := Status{Available: true, Self: &self}
+	if self.ID != "" || self.TailscaleIP != "" || self.DNSName != "" {
+		status.Devices = append(status.Devices, toDevice(self))
+	}
 	for _, peer := range raw.Peer {
 		p := toPeer(peer)
 		status.Peers = append(status.Peers, p)
@@ -128,7 +131,7 @@ func toPeer(raw rawPeer) Peer {
 
 func toDevice(peer Peer) devices.Device {
 	host := peer.TailscaleIP
-	if peer.DNSName != "" {
+	if host == "" {
 		host = peer.DNSName
 	}
 	name := peer.HostName
@@ -136,7 +139,7 @@ func toDevice(peer Peer) devices.Device {
 		name = host
 	}
 	return devices.Normalize(devices.Device{
-		ID:          devices.NewID(peer.ID, peer.DNSName, peer.TailscaleIP),
+		ID:          tailscaleDeviceID(peer),
 		Name:        name,
 		Host:        host,
 		TailscaleIP: peer.TailscaleIP,
@@ -150,4 +153,11 @@ func toDevice(peer Peer) devices.Device {
 		Tags:        peer.Tags,
 		OS:          peer.OS,
 	})
+}
+
+func tailscaleDeviceID(peer Peer) string {
+	if peer.ID != "" {
+		return devices.NewID(peer.ID)
+	}
+	return devices.NewID(peer.DNSName, peer.TailscaleIP)
 }

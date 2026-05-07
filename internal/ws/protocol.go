@@ -25,11 +25,8 @@ const (
 )
 
 type Auth struct {
-	Type       string `json:"type,omitempty"`
-	Password   string `json:"password,omitempty"`
-	KeyPath    string `json:"keyPath,omitempty"`
-	Passphrase string `json:"passphrase,omitempty"`
-	UseAgent   bool   `json:"useAgent,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 type ClientMessage struct {
@@ -94,7 +91,10 @@ func ValidateConnect(msg ClientMessage) error {
 		return errors.New("user is required")
 	}
 	if msg.Port < 0 || msg.Port > 65535 {
-		return errors.New("port must be between 1 and 65535")
+		return errors.New("port must be between 0 and 65535; 0 uses the default port 22")
+	}
+	if msg.Auth.Password == "" {
+		return errors.New("password is required")
 	}
 	return nil
 }

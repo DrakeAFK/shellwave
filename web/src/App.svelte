@@ -44,12 +44,11 @@
   let importSelections = {};
   let importUsers = {};
   let importDefaultUser = 'root';
-  let importDefaultAuthMode = 'password';
   let importError = '';
   let deviceSearch = '';
   let deviceFilter = 'all';
   let sessionPasswords = {};
-  let newDevice = { name: '', host: '', user: 'root', password: '', port: 22, authMode: 'password', keyPath: '' };
+  let newDevice = { name: '', host: '', user: 'root', password: '', port: 22 };
   let commandText = 'uname -a && uptime';
   let commandPassword = '';
   let commandRunning = false;
@@ -57,7 +56,7 @@
   let overview = null;
   let overviewDeviceID = '';
   let overviewProbing = false;
-  let editDevice = { id: '', name: '', host: '', user: 'root', port: 22, authMode: 'password', keyPath: '', favorite: false, notes: '' };
+  let editDevice = { id: '', name: '', host: '', user: 'root', port: 22, favorite: false, notes: '' };
   let quickSSHUser = '';
   let quickSSHDeviceID = '';
   let quickSSHSaving = false;
@@ -146,6 +145,8 @@
     }
     selectedDevice = null;
     devices = [];
+    sessionPasswords = {};
+    commandPassword = '';
     authPassword = '';
     authStatus = { setupRequired: false, authenticated: false };
   }
@@ -196,8 +197,7 @@
 
   function initializeImportState(status = tailscaleStatus) {
     const discovered = status?.devices || [];
-    const existingIDs = new Set(devices.map((device) => device.id));
-    importSelections = Object.fromEntries(discovered.map((device) => [device.id, !existingIDs.has(device.id)]));
+    importSelections = Object.fromEntries(discovered.map((device) => [device.id, !isImported(device)]));
     importUsers = Object.fromEntries(discovered.map((device) => [device.id, device.user || importDefaultUser || 'root']));
     if (discovered.length > 0 && !Object.values(importSelections).some(Boolean)) {
       importSelections = Object.fromEntries(discovered.map((device) => [device.id, true]));
@@ -224,7 +224,11 @@
   $: selectedImportCount = Object.values(importSelections).filter(Boolean).length;
 
   function isImported(device) {
-    return devices.some((item) => item.id === device.id);
+    return devices.some((item) =>
+      item.id === device.id ||
+      (device.tailscaleIp && item.tailscaleIp === device.tailscaleIp) ||
+      (device.magicDns && item.magicDns === device.magicDns)
+    );
   }
 
   async function importTailnet() {
@@ -236,12 +240,10 @@
         method: 'POST',
         body: JSON.stringify({
           defaultUser: importDefaultUser,
-          defaultAuthMode: importDefaultAuthMode,
           devices: selected.map((device) => ({
             id: device.id,
             user: importUsers[device.id] || importDefaultUser || 'root',
-            port: device.port || 22,
-            authMode: importDefaultAuthMode
+            port: device.port || 22
           }))
         })
       });
@@ -281,7 +283,12 @@
     try {
       const data = await apiFetch('/api/devices', {
         method: 'POST',
-        body: JSON.stringify(newDevice)
+        body: JSON.stringify({
+          name: newDevice.name,
+          host: newDevice.host,
+          user: newDevice.user,
+          port: newDevice.port || 22
+        })
       });
       const device = data.device;
       devices = [...devices.filter((item) => item.id !== device.id), device];
@@ -292,7 +299,7 @@
       commandPassword = newDevice.password;
       activeTab = 'terminal';
       showAddModal = false;
-      newDevice = { name: '', host: '', user: 'root', password: '', port: 22, authMode: 'password', keyPath: '' };
+      newDevice = { name: '', host: '', user: 'root', password: '', port: 22 };
     } catch (error) {
       apiError = error.message;
     }
@@ -320,8 +327,6 @@
       host: selectedDevice.host || deviceHost(selectedDevice),
       user: selectedDevice.user,
       port: selectedDevice.port || 22,
-      authMode: selectedDevice.authMode || 'password',
-      keyPath: selectedDevice.keyPath || '',
       favorite: !!selectedDevice.favorite,
       notes: selectedDevice.notes || ''
     };
@@ -365,8 +370,6 @@
           host: selectedDevice.host || deviceHost(selectedDevice),
           user,
           port: selectedDevice.port || 22,
-          authMode: selectedDevice.authMode || 'password',
-          keyPath: selectedDevice.keyPath || '',
           favorite: !!selectedDevice.favorite,
           notes: selectedDevice.notes || ''
         })
@@ -418,8 +421,6 @@
           host: device.host || deviceHost(device),
           user: device.user,
           port: device.port || 22,
-          authMode: device.authMode || 'password',
-          keyPath: device.keyPath || '',
           favorite: !device.favorite,
           notes: device.notes || ''
         })
@@ -475,7 +476,7 @@
   }
 
   function terminalPassword(device) {
-    return (device.authMode || 'password') === 'password' ? (sessionPasswords[device.id] || '') : '';
+    return sessionPasswords[device.id] || '';
   }
 
   function deviceHost(device) {
@@ -483,12 +484,9 @@
   }
 
   function authPayload(device, password = '') {
-    const type = device?.authMode || (password ? 'password' : 'agent');
     return {
-      type,
-      password: type === 'password' ? password : '',
-      keyPath: type === 'key' ? (device?.keyPath || '') : '',
-      useAgent: type === 'agent'
+      type: 'password',
+      password
     };
   }
 
@@ -509,7 +507,6 @@
         device.tailscaleIp,
         device.user,
         device.source,
-        device.authMode,
         device.os,
         ...(device.tags || [])
       ].filter(Boolean).join(' ').toLowerCase();
@@ -611,14 +608,13 @@
               >
                 <div class="relative shrink-0">
                   <Server size={16} />
-                  <div class="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-background {device.online ? 'bg-accent' : 'bg-red-500'}" />
+                  <div class="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-background {device.online ? 'bg-accent' : 'bg-red-500'}"></div>
                 </div>
                 <div class="flex-1 text-left min-w-0">
                   <div class="text-sm font-medium truncate">{device.name}</div>
                   <div class="text-[10px] opacity-60 truncate">{deviceHost(device)}</div>
                   <div class="mt-1 flex flex-wrap gap-1">
                     <span class="text-[9px] uppercase border border-border rounded px-1.5 py-0.5 opacity-70">{device.source}</span>
-                    <span class="text-[9px] uppercase border border-border rounded px-1.5 py-0.5 opacity-70">{device.authMode || 'password'}</span>
                     {#if device.os}
                       <span class="text-[9px] uppercase border border-border rounded px-1.5 py-0.5 opacity-70">{device.os}</span>
                     {/if}
@@ -687,7 +683,7 @@
         <div class="hidden md:flex items-center gap-4 text-right">
           <div class="flex flex-col items-end">
             <span class="text-[10px] font-bold uppercase text-muted-foreground">Source</span>
-            <span class="text-xs capitalize">{selectedDevice.source} / {selectedDevice.authMode || 'password'}</span>
+            <span class="text-xs capitalize">{selectedDevice.source} / password</span>
           </div>
           <button on:click={openEditDevice} class="border border-border bg-muted p-2 rounded-md hover:text-accent transition-colors" aria-label="Edit device">
             <Pencil size={14} />
@@ -707,23 +703,32 @@
               <div class="w-full h-full flex flex-col">
                 <div class="flex items-center justify-between mb-4 px-2 shrink-0">
                   <div class="flex gap-1.5">
-                    <div class="w-2.5 h-2.5 rounded-full bg-red-500/50" />
-                    <div class="w-2.5 h-2.5 rounded-full bg-yellow-500/50" />
-                    <div class="w-2.5 h-2.5 rounded-full bg-green-500/50" />
+                    <div class="w-2.5 h-2.5 rounded-full bg-red-500/50"></div>
+                    <div class="w-2.5 h-2.5 rounded-full bg-yellow-500/50"></div>
+                    <div class="w-2.5 h-2.5 rounded-full bg-green-500/50"></div>
                   </div>
                   <div class="text-[10px] text-muted-foreground font-mono">ssh -t {selectedDevice.user}@{deviceHost(selectedDevice)}</div>
                 </div>
                 <div class="flex-1 min-h-0">
-                  {#key `${selectedDevice.id}:${selectedDevice.user}:${selectedDevice.port || 22}:${selectedDevice.authMode || 'password'}:${selectedDevice.keyPath || ''}`}
-                    <Terminal
-                      host={deviceHost(selectedDevice)}
-                      user={selectedDevice.user}
-                      pass={terminalPassword(selectedDevice)}
-                      port={selectedDevice.port || 22}
-                      authMode={selectedDevice.authMode || 'password'}
-                      keyPath={selectedDevice.keyPath || ''}
-                    />
-                  {/key}
+                  {#if !terminalPassword(selectedDevice)}
+                    <div class="flex h-full items-center justify-center">
+                      <div class="w-full max-w-sm space-y-3 rounded-lg border border-border bg-background p-4">
+                        <label for="terminal-session-password" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Session Password</label>
+                        <input id="terminal-session-password" bind:value={sessionPasswords[selectedDevice.id]} type="password" class="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm focus:outline-none focus:border-accent" />
+                        <p class="text-[11px] leading-relaxed text-muted-foreground">Passwords stay in this browser session and are sent in the first WebSocket message, never in the URL.</p>
+                      </div>
+                    </div>
+                  {:else}
+                    {#key `${selectedDevice.id}:${selectedDevice.user}:${selectedDevice.port || 22}:${terminalPassword(selectedDevice) ? 'ready' : 'empty'}`}
+                      <Terminal
+                        deviceId={selectedDevice.id}
+                        host={deviceHost(selectedDevice)}
+                        user={selectedDevice.user}
+                        pass={terminalPassword(selectedDevice)}
+                        port={selectedDevice.port || 22}
+                      />
+                    {/key}
+                  {/if}
                 </div>
               </div>
             </div>
@@ -759,8 +764,8 @@
               </div>
               <div class="border border-border bg-muted/25 rounded-lg p-4">
                 <Shield size={18} class="text-accent mb-3" />
-                <div class="text-[10px] uppercase text-muted-foreground font-bold">SSH Auth</div>
-                <div class="text-sm">{selectedDevice.user} / {selectedDevice.authMode || 'password'}</div>
+                <div class="text-[10px] uppercase text-muted-foreground font-bold">SSH User</div>
+                <div class="text-sm">{selectedDevice.user}</div>
               </div>
               <div class="border border-border bg-muted/25 rounded-lg p-4">
                 <Search size={18} class="text-accent mb-3" />
@@ -820,25 +825,13 @@
             <section class="border border-border bg-muted/25 rounded-xl p-6 space-y-4">
               <div class="flex items-center justify-between gap-4">
                 <h3 class="font-bold">SSH Authentication</h3>
-                {#if (selectedDevice.authMode || 'password') === 'password'}
-                  <button on:click={saveSelectedDevicePassword} class="border border-border bg-background px-4 py-2 rounded-md text-xs hover:text-accent transition-colors">Use Password</button>
-                {/if}
+                <button on:click={saveSelectedDevicePassword} class="border border-border bg-background px-4 py-2 rounded-md text-xs hover:text-accent transition-colors">Use Password</button>
               </div>
-              {#if (selectedDevice.authMode || 'password') === 'password'}
-                <div class="space-y-1.5">
-                  <label for="selected-session-password" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Session Password</label>
-                  <input id="selected-session-password" bind:value={sessionPasswords[selectedDevice.id]} type="password" class="w-full bg-background border border-border rounded-md px-3 py-2 text-sm focus:outline-none focus:border-accent" />
-                </div>
-                <p class="text-[11px] leading-relaxed text-muted-foreground">Passwords are kept in this browser session only and are sent in the first WebSocket message or command request body, never in the URL.</p>
-              {:else if selectedDevice.authMode === 'key'}
-                <div class="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                  Key path <span class="font-mono text-foreground">{selectedDevice.keyPath || 'Not configured'}</span>
-                </div>
-              {:else}
-                <div class="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-                  ShellWave will use the server process SSH agent through <span class="font-mono text-foreground">SSH_AUTH_SOCK</span>.
-                </div>
-              {/if}
+              <div class="space-y-1.5">
+                <label for="selected-session-password" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Session Password</label>
+                <input id="selected-session-password" bind:value={sessionPasswords[selectedDevice.id]} type="password" class="w-full bg-background border border-border rounded-md px-3 py-2 text-sm focus:outline-none focus:border-accent" />
+              </div>
+              <p class="text-[11px] leading-relaxed text-muted-foreground">Passwords are kept in this browser session only and are sent in the first WebSocket message or command request body, never in the URL.</p>
             </section>
           </div>
         {:else if activeTab === 'commands'}
@@ -854,11 +847,9 @@
             </section>
 
             <section class="border border-border bg-muted/25 rounded-xl p-4 flex flex-col min-h-[520px] space-y-4">
-              <div class="grid grid-cols-1 {(selectedDevice.authMode || 'password') === 'password' ? 'md:grid-cols-[1fr_220px_auto]' : 'md:grid-cols-[1fr_auto]'} gap-3">
+              <div class="grid grid-cols-1 md:grid-cols-[1fr_220px_auto] gap-3">
                 <input bind:value={commandText} class="bg-background border border-border rounded-md px-3 py-2 font-mono text-sm focus:outline-none focus:border-accent" />
-                {#if (selectedDevice.authMode || 'password') === 'password'}
-                  <input bind:value={commandPassword} type="password" placeholder="Password for this run" class="bg-background border border-border rounded-md px-3 py-2 text-sm focus:outline-none focus:border-accent" />
-                {/if}
+                <input bind:value={commandPassword} type="password" placeholder="Password for this run" class="bg-background border border-border rounded-md px-3 py-2 text-sm focus:outline-none focus:border-accent" />
                 <button on:click={runCommand} disabled={commandRunning} class="bg-accent text-black font-bold rounded-md px-4 py-2 text-sm disabled:opacity-50 flex items-center gap-2 justify-center">
                   <Play size={14} /> {commandRunning ? 'Running' : 'Run'}
                 </button>
@@ -914,7 +905,7 @@ exit {commandResult.exitCode}{:else}Command output will appear here.{/if}</pre>
             </section>
             <section class="border border-border bg-muted/20 rounded-xl p-5">
               <div class="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Default SSH</div>
-              <div class="mt-3 text-sm">Imported devices start as <span class="font-mono text-foreground">root</span> with <span class="font-mono text-foreground">password</span> auth.</div>
+              <div class="mt-3 text-sm">Imported devices start with user <span class="font-mono text-foreground">root</span> and browser-session passwords.</div>
             </section>
             <section class="border border-border bg-muted/20 rounded-xl p-5">
               <div class="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Data</div>
@@ -947,18 +938,10 @@ exit {commandResult.exitCode}{:else}Command output will appear here.{/if}</pre>
           <button on:click={() => { showImportModal = false; showAddModal = true; }} class="bg-accent text-black font-bold px-4 py-2 rounded-md text-sm">Add Manual Device</button>
         </div>
       {:else}
-        <div class="grid grid-cols-1 md:grid-cols-[1fr_180px_160px] gap-3">
+        <div class="grid grid-cols-1 md:grid-cols-[1fr_160px] gap-3">
           <div class="space-y-1.5">
             <label for="import-default-user" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Default SSH User</label>
             <input id="import-default-user" value={importDefaultUser} on:input={(event) => updateImportDefaultUser(event.currentTarget.value)} class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-accent" />
-          </div>
-          <div class="space-y-1.5">
-            <label for="import-auth-mode" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Auth Mode</label>
-            <select id="import-auth-mode" bind:value={importDefaultAuthMode} class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-accent">
-              <option value="password">Password</option>
-              <option value="key">Key Path</option>
-              <option value="agent">SSH Agent</option>
-            </select>
           </div>
           <div class="flex items-end gap-2">
             <button on:click={() => setAllImportSelections(true)} class="flex-1 border border-border bg-muted px-3 py-2.5 rounded-lg text-xs hover:text-accent">All</button>
@@ -1056,34 +1039,15 @@ exit {commandResult.exitCode}{:else}Command output will appear here.{/if}</pre>
             <input id="device-port" bind:value={newDevice.port} type="number" class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors" />
           </div>
         </div>
-        <div class="grid grid-cols-2 gap-4">
-          <div class="space-y-1.5">
-            <label for="device-user" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">User</label>
-            <input id="device-user" bind:value={newDevice.user} type="text" class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors" />
-          </div>
-          <div class="space-y-1.5">
-            <label for="device-auth-mode" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Auth Mode</label>
-            <select id="device-auth-mode" bind:value={newDevice.authMode} class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors">
-              <option value="password">Password</option>
-              <option value="key">Key Path</option>
-              <option value="agent">SSH Agent</option>
-            </select>
-          </div>
+        <div class="space-y-1.5">
+          <label for="device-user" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">User</label>
+          <input id="device-user" bind:value={newDevice.user} type="text" class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors" />
         </div>
-        {#if newDevice.authMode === 'password'}
-          <div class="space-y-1.5">
-            <label for="device-password" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Session Password</label>
-            <input id="device-password" bind:value={newDevice.password} type="password" class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors" />
-          </div>
-          <p class="text-[11px] leading-relaxed text-muted-foreground">Passwords are used for the current browser session and are not persisted by the backend.</p>
-        {:else if newDevice.authMode === 'key'}
-          <div class="space-y-1.5">
-            <label for="device-key-path" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Private Key Path</label>
-            <input id="device-key-path" bind:value={newDevice.keyPath} type="text" placeholder="~/.ssh/id_ed25519" class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors" />
-          </div>
-        {:else}
-          <p class="text-[11px] leading-relaxed text-muted-foreground">Agent mode uses the ShellWave server process SSH agent. Make sure <span class="font-mono">SSH_AUTH_SOCK</span> is available where the server runs.</p>
-        {/if}
+        <div class="space-y-1.5">
+          <label for="device-password" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Session Password</label>
+          <input id="device-password" bind:value={newDevice.password} type="password" class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors" />
+        </div>
+        <p class="text-[11px] leading-relaxed text-muted-foreground">Passwords are used for the current browser session and are not persisted by the backend.</p>
       </div>
 
       <button on:click={addDevice} class="w-full bg-accent text-black font-bold py-3 rounded-xl hover:scale-[1.02] transition-transform active:scale-[0.98]">
@@ -1118,26 +1082,10 @@ exit {commandResult.exitCode}{:else}Command output will appear here.{/if}</pre>
             <input id="edit-device-port" bind:value={editDevice.port} type="number" class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors" />
           </div>
         </div>
-        <div class="grid grid-cols-2 gap-4">
-          <div class="space-y-1.5">
-            <label for="edit-device-user" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">User</label>
-            <input id="edit-device-user" bind:value={editDevice.user} type="text" class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors" />
-          </div>
-          <div class="space-y-1.5">
-            <label for="edit-device-auth-mode" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Auth Mode</label>
-            <select id="edit-device-auth-mode" bind:value={editDevice.authMode} class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors">
-              <option value="password">Password</option>
-              <option value="key">Key Path</option>
-              <option value="agent">SSH Agent</option>
-            </select>
-          </div>
+        <div class="space-y-1.5">
+          <label for="edit-device-user" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">User</label>
+          <input id="edit-device-user" bind:value={editDevice.user} type="text" class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors" />
         </div>
-        {#if editDevice.authMode === 'key'}
-          <div class="space-y-1.5">
-            <label for="edit-device-key-path" class="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Private Key Path</label>
-            <input id="edit-device-key-path" bind:value={editDevice.keyPath} type="text" class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 focus:outline-none focus:border-accent transition-colors" />
-          </div>
-        {/if}
         <label class="flex items-center gap-3 rounded-lg border border-border bg-muted px-4 py-3 text-sm">
           <input bind:checked={editDevice.favorite} type="checkbox" class="accent-lime-300" />
           <span>Favorite device</span>

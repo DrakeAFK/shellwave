@@ -30,6 +30,7 @@ type API struct {
 	Tailscale         func(context.Context) (tailscale.Status, error)
 	AllowPublicHosts  bool
 	AllowedExtraHosts []string
+	TrustProxy        bool
 
 	authMu        sync.Mutex
 	loginAttempts map[string][]time.Time
@@ -230,9 +231,10 @@ func (api *API) allowLoginAttempt(r *http.Request) bool {
 	if api.loginAttempts == nil {
 		api.loginAttempts = map[string][]time.Time{}
 	}
-	key := clientIP(r)
 	now := time.Now().UTC()
 	windowStart := now.Add(-5 * time.Minute)
+	pruneAttemptMap(api.loginAttempts, windowStart)
+	key := api.clientIP(r)
 	attempts := api.loginAttempts[key]
 	filtered := attempts[:0]
 	for _, attempt := range attempts {
@@ -251,7 +253,7 @@ func (api *API) allowLoginAttempt(r *http.Request) bool {
 func (api *API) clearLoginAttempts(r *http.Request) {
 	api.authMu.Lock()
 	defer api.authMu.Unlock()
-	delete(api.loginAttempts, clientIP(r))
+	delete(api.loginAttempts, api.clientIP(r))
 }
 
 func (api *API) AllowSSHAttempt(r *http.Request) bool {
@@ -260,9 +262,10 @@ func (api *API) AllowSSHAttempt(r *http.Request) bool {
 	if api.sshAttempts == nil {
 		api.sshAttempts = map[string][]time.Time{}
 	}
-	key := clientIP(r)
 	now := time.Now().UTC()
 	windowStart := now.Add(-1 * time.Minute)
+	pruneAttemptMap(api.sshAttempts, windowStart)
+	key := api.clientIP(r)
 	attempts := api.sshAttempts[key]
 	filtered := attempts[:0]
 	for _, attempt := range attempts {
@@ -282,7 +285,7 @@ func (api *API) CheckHostAllowed(ctx context.Context, host string) error {
 	if api.AllowPublicHosts {
 		return nil
 	}
-	
+
 	// Check if it matches allowed extra hosts exactly
 	for _, allowed := range api.AllowedExtraHosts {
 		if strings.EqualFold(host, allowed) {
@@ -290,45 +293,57 @@ func (api *API) CheckHostAllowed(ctx context.Context, host string) error {
 		}
 	}
 
-	// Try parsing as IP
-	ip := net.ParseIP(host)
-	if ip == nil {
-		// Resolve host to IP
-		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-		if err != nil {
-			return fmt.Errorf("host resolution failed: %w", err)
+	if ip := net.ParseIP(host); ip != nil {
+		if api.ipAllowed(ip) {
+			return nil
 		}
-		if len(ips) == 0 {
-			return errors.New("no IP addresses found for host")
-		}
-		ip = ips[0].IP
+		return errors.New("connection to public host is not allowed by policy")
 	}
 
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return fmt.Errorf("host resolution failed: %w", err)
+	}
+	if len(ips) == 0 {
+		return errors.New("no IP addresses found for host")
+	}
+
+	for _, resolved := range ips {
+		if !api.ipAllowed(resolved.IP) {
+			return errors.New("connection to public host is not allowed by policy")
+		}
+	}
+	return nil
+}
+
+func (api *API) ipAllowed(ip net.IP) bool {
 	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return nil
+		return true
 	}
 
-	// Allow Tailscale / CGNAT IPs (RFC 6598)
 	_, cgnat, _ := net.ParseCIDR("100.64.0.0/10")
 	if cgnat.Contains(ip) {
-		return nil
+		return true
 	}
 
-	// Check if the IP falls within any allowed CIDR blocks
 	for _, allowed := range api.AllowedExtraHosts {
 		_, ipNet, err := net.ParseCIDR(allowed)
 		if err == nil && ipNet.Contains(ip) {
-			return nil
+			return true
 		}
 	}
-
-	return errors.New("connection to public host is not allowed by policy")
+	return false
 }
 
 func (api *API) devices(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"devices": api.Store.ListDevices()})
+		devices, err := api.Store.ListDevices()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "store_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"devices": devices})
 	case http.MethodPost:
 		var req deviceRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -345,10 +360,9 @@ func (api *API) devices(w http.ResponseWriter, r *http.Request) {
 			Host:     req.Host,
 			User:     req.User,
 			Port:     req.Port,
-			AuthMode: req.AuthMode,
-			KeyPath:  req.KeyPath,
+			AuthMode: "password",
 			Source:   "manual",
-			Online:   true,
+			Online:   false,
 			Favorite: req.Favorite,
 			Notes:    req.Notes,
 		})
@@ -417,10 +431,8 @@ func (api *API) deviceByID(w http.ResponseWriter, r *http.Request, id string) {
 		if req.Port > 0 {
 			existing.Port = req.Port
 		}
-		if strings.TrimSpace(req.AuthMode) != "" {
-			existing.AuthMode = req.AuthMode
-		}
-		existing.KeyPath = req.KeyPath
+		existing.AuthMode = "password"
+		existing.KeyPath = ""
 		existing.Favorite = req.Favorite
 		existing.Notes = req.Notes
 		device, err := api.Store.UpsertDevice(existing)
@@ -476,6 +488,7 @@ func (api *API) testDevice(w http.ResponseWriter, r *http.Request, device device
 
 	if err := api.CheckHostAllowed(r.Context(), host); err != nil {
 		result.Message = err.Error()
+		api.updateDeviceOnline(device, false)
 		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "result": result})
 		return
 	}
@@ -485,6 +498,7 @@ func (api *API) testDevice(w http.ResponseWriter, r *http.Request, device device
 	if net.ParseIP(host) == nil {
 		if _, err := net.DefaultResolver.LookupHost(dnsCtx, host); err != nil {
 			result.Message = "DNS/host resolution failed: " + err.Error()
+			api.updateDeviceOnline(device, false)
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "result": result})
 			return
 		}
@@ -495,11 +509,13 @@ func (api *API) testDevice(w http.ResponseWriter, r *http.Request, device device
 	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
 	if err != nil {
 		result.Message = "SSH port is unreachable: " + err.Error()
+		api.updateDeviceOnline(device, false)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "result": result})
 		return
 	}
 	_ = conn.Close()
 	result.PortOpen = true
+	api.updateDeviceOnline(device, true)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
@@ -526,6 +542,14 @@ func (api *API) testDevice(w http.ResponseWriter, r *http.Request, device device
 		result.Message = "SSH authenticated, but the validation command did not return the expected response"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": result.CommandOk, "result": result})
+}
+
+func (api *API) updateDeviceOnline(device devices.Device, online bool) {
+	device.Online = online
+	if online {
+		device.LastSeen = time.Now().UTC()
+	}
+	_, _ = api.Store.UpsertDevice(device)
 }
 
 func (api *API) overview(w http.ResponseWriter, r *http.Request, device devices.Device) {
@@ -569,9 +593,11 @@ func (api *API) probeOverview(w http.ResponseWriter, r *http.Request, device dev
 	defer cancel()
 	result, err := api.runSSH(ctx, device, req.Auth, overviewCommand, 15*time.Second)
 	if err != nil {
+		api.updateDeviceOnline(device, false)
 		api.writeSSHError(w, "probe_failed", err)
 		return
 	}
+	api.updateDeviceOnline(device, true)
 	writeJSON(w, http.StatusOK, map[string]any{"overview": parseOverview(result.Stdout), "result": result})
 }
 
@@ -600,9 +626,11 @@ func (api *API) runCommand(w http.ResponseWriter, r *http.Request, device device
 	defer cancel()
 	result, err := api.runSSH(ctx, device, req.Auth, req.Command, 15*time.Second)
 	if err != nil {
+		api.updateDeviceOnline(device, false)
 		api.writeSSHError(w, "command_failed", err)
 		return
 	}
+	api.updateDeviceOnline(device, true)
 	writeJSON(w, http.StatusOK, map[string]any{"result": result})
 }
 
@@ -714,6 +742,12 @@ func (api *API) tailscaleStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "tailscale_failed", err.Error())
 		return
 	}
+	if status.Available {
+		if err := api.Store.UpdateTailscaleMetadata(status.Devices); err != nil {
+			writeError(w, http.StatusInternalServerError, "store_failed", err.Error())
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -745,7 +779,12 @@ func (api *API) importTailscale(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "store_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"devices": api.Store.ListDevices(), "imported": len(importDevices)})
+	devices, err := api.Store.ListDevices()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"devices": devices, "imported": len(importDevices)})
 }
 
 func (api *API) localTailscaleStatus(ctx context.Context) (tailscale.Status, error) {
@@ -762,10 +801,6 @@ func (api *API) prepareTailscaleImportDevices(discovered []devices.Device, req t
 	}
 
 	defaultUser := strings.TrimSpace(req.DefaultUser)
-	defaultAuthMode := normalizeAuthMode(req.DefaultAuthMode)
-	if defaultAuthMode == "" {
-		defaultAuthMode = "password"
-	}
 
 	var importDevices []devices.Device
 	if len(req.Devices) > 0 {
@@ -774,7 +809,7 @@ func (api *API) prepareTailscaleImportDevices(discovered []devices.Device, req t
 			if !ok {
 				continue
 			}
-			importDevices = append(importDevices, api.applyTailnetImportOptions(device, item, defaultUser, defaultAuthMode, true))
+			importDevices = append(importDevices, api.applyTailnetImportOptions(device, item, defaultUser, true))
 		}
 		return importDevices
 	}
@@ -785,18 +820,18 @@ func (api *API) prepareTailscaleImportDevices(discovered []devices.Device, req t
 			if !ok {
 				continue
 			}
-			importDevices = append(importDevices, api.applyTailnetImportOptions(device, tailscaleImportDevice{ID: id}, defaultUser, defaultAuthMode, defaultUser != "" || req.DefaultAuthMode != ""))
+			importDevices = append(importDevices, api.applyTailnetImportOptions(device, tailscaleImportDevice{ID: id}, defaultUser, defaultUser != ""))
 		}
 		return importDevices
 	}
 
 	for _, device := range discovered {
-		importDevices = append(importDevices, api.applyTailnetImportOptions(device, tailscaleImportDevice{ID: device.ID}, defaultUser, defaultAuthMode, false))
+		importDevices = append(importDevices, api.applyTailnetImportOptions(device, tailscaleImportDevice{ID: device.ID}, defaultUser, false))
 	}
 	return importDevices
 }
 
-func (api *API) applyTailnetImportOptions(device devices.Device, item tailscaleImportDevice, defaultUser, defaultAuthMode string, forceDefaults bool) devices.Device {
+func (api *API) applyTailnetImportOptions(device devices.Device, item tailscaleImportDevice, defaultUser string, forceDefaults bool) devices.Device {
 	existing, exists := api.Store.GetDevice(device.ID)
 	if exists {
 		device.Favorite = existing.Favorite
@@ -805,7 +840,6 @@ func (api *API) applyTailnetImportOptions(device devices.Device, item tailscaleI
 			device.User = existing.User
 			device.Port = existing.Port
 			device.AuthMode = existing.AuthMode
-			device.KeyPath = existing.KeyPath
 		}
 	}
 
@@ -823,32 +857,10 @@ func (api *API) applyTailnetImportOptions(device devices.Device, item tailscaleI
 		device.Port = 22
 	}
 
-	if authMode := normalizeAuthMode(item.AuthMode); authMode != "" {
-		device.AuthMode = authMode
-	} else if defaultAuthMode != "" && (forceDefaults || device.AuthMode == "") {
-		device.AuthMode = defaultAuthMode
-	} else if device.AuthMode == "" {
-		device.AuthMode = "password"
-	}
-	if strings.TrimSpace(item.KeyPath) != "" {
-		device.KeyPath = strings.TrimSpace(item.KeyPath)
-	} else if forceDefaults {
-		device.KeyPath = ""
-	}
-	if device.AuthMode != "key" && item.KeyPath == "" && (!exists || forceDefaults) {
-		device.KeyPath = ""
-	}
+	device.AuthMode = "password"
+	device.KeyPath = ""
 	device.Source = "tailscale"
 	return device
-}
-
-func normalizeAuthMode(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "password", "key", "agent":
-		return strings.ToLower(strings.TrimSpace(value))
-	default:
-		return ""
-	}
 }
 
 type deviceRequest struct {
@@ -857,11 +869,8 @@ type deviceRequest struct {
 	Host     string `json:"host"`
 	User     string `json:"user"`
 	Port     int    `json:"port"`
-	AuthMode string `json:"authMode"`
-	KeyPath  string `json:"keyPath"`
 	Favorite bool   `json:"favorite"`
 	Notes    string `json:"notes"`
-	Password string `json:"password"`
 }
 
 type commandRequest struct {
@@ -880,18 +889,15 @@ type passwordAuthRequest struct {
 }
 
 type tailscaleImportRequest struct {
-	DefaultUser     string                  `json:"defaultUser"`
-	DefaultAuthMode string                  `json:"defaultAuthMode"`
-	DeviceIDs       []string                `json:"deviceIds"`
-	Devices         []tailscaleImportDevice `json:"devices"`
+	DefaultUser string                  `json:"defaultUser"`
+	DeviceIDs   []string                `json:"deviceIds"`
+	Devices     []tailscaleImportDevice `json:"devices"`
 }
 
 type tailscaleImportDevice struct {
-	ID       string `json:"id"`
-	User     string `json:"user"`
-	Port     int    `json:"port"`
-	AuthMode string `json:"authMode"`
-	KeyPath  string `json:"keyPath"`
+	ID   string `json:"id"`
+	User string `json:"user"`
+	Port int    `json:"port"`
 }
 
 type trustKnownHostRequest struct {
@@ -913,20 +919,8 @@ type connectionTestResult struct {
 	HostKey   *ssh.HostKeyDetails `json:"hostKey,omitempty"`
 }
 
-func mergeAuth(device devices.Device, auth ssh.AuthConfig) ssh.AuthConfig {
-	if auth.Type == "" {
-		auth.Type = device.AuthMode
-	}
-	if auth.Type == "" {
-		auth.Type = "agent"
-	}
-	if auth.KeyPath == "" {
-		auth.KeyPath = device.KeyPath
-	}
-	if auth.Type == "agent" {
-		auth.UseAgent = true
-	}
-	return auth
+func mergeAuth(_ devices.Device, auth ssh.AuthConfig) ssh.AuthConfig {
+	return ssh.AuthConfig{Type: "password", Password: auth.Password}
 }
 
 const sessionCookieName = "shellwave_session"
@@ -973,16 +967,34 @@ func requestIsHTTPS(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-func clientIP(r *http.Request) string {
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		first, _, _ := strings.Cut(forwarded, ",")
-		return strings.TrimSpace(first)
+func (api *API) clientIP(r *http.Request) string {
+	if api.TrustProxy {
+		if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+			first, _, _ := strings.Cut(forwarded, ",")
+			return strings.TrimSpace(first)
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func pruneAttemptMap(attemptsByIP map[string][]time.Time, windowStart time.Time) {
+	for key, attempts := range attemptsByIP {
+		filtered := attempts[:0]
+		for _, attempt := range attempts {
+			if attempt.After(windowStart) {
+				filtered = append(filtered, attempt)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(attemptsByIP, key)
+			continue
+		}
+		attemptsByIP[key] = filtered
+	}
 }
 
 const overviewCommand = `printf 'user=%s\n' "$(whoami 2>/dev/null)"

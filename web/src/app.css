@@ -5,6 +5,7 @@
   --color-foreground: #ededed;
   --color-accent: #10b981;
   --color-muted: #111111;
+  --color-muted-foreground: #8a8a8a;
   --color-border: #222222;
   --font-mono: "JetBrains Mono", "Fira Code", monospace;
 }

@@ -19,6 +19,16 @@ func TestValidateConnect(t *testing.T) {
 	}
 }
 
+func TestValidateConnectRequiresPassword(t *testing.T) {
+	msg, err := DecodeClientMessage([]byte(`{"type":"connect","host":"100.64.0.1","user":"root","port":22}`))
+	if err != nil {
+		t.Fatalf("decode connect: %v", err)
+	}
+	if err := ValidateConnect(msg); err == nil {
+		t.Fatal("expected missing password error")
+	}
+}
+
 func TestEncodeServerMessage(t *testing.T) {
 	data, err := EncodeServerMessage(Output("hello"))
 	if err != nil {

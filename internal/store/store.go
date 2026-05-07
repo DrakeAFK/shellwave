@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,24 +208,29 @@ func (s *Store) migrate() error {
 	return tx.Commit()
 }
 
-func (s *Store) ListDevices() []devices.Device {
+func (s *Store) ListDevices() ([]devices.Device, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := s.dedupeTailscaleDevicesLocked(); err != nil {
+		return nil, err
+	}
+
 	rows, err := s.db.Query(`SELECT id, name, host, tailscale_ip, magic_dns, user, port, auth_mode, key_path, source, online, last_seen, tags_json, os, favorite, notes, created_at, updated_at FROM devices ORDER BY favorite DESC, lower(name), lower(host)`)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 
 	var out []devices.Device
 	for rows.Next() {
 		device, err := scanDevice(rows)
-		if err == nil {
-			out = append(out, device)
+		if err != nil {
+			return nil, err
 		}
+		out = append(out, device)
 	}
-	return out
+	return out, rows.Err()
 }
 
 func (s *Store) GetDevice(id string) (devices.Device, bool) {
@@ -266,9 +272,6 @@ func (s *Store) UpsertDevice(device devices.Device) (devices.Device, error) {
 		if original.OS == "" {
 			device.OS = existing.OS
 		}
-		if original.AuthMode == "" {
-			device.AuthMode = existing.AuthMode
-		}
 		if original.LastSeen.IsZero() {
 			device.LastSeen = existing.LastSeen
 		}
@@ -283,20 +286,312 @@ func (s *Store) UpsertDevice(device devices.Device) (devices.Device, error) {
 }
 
 func (s *Store) MergeDevices(items []devices.Device) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	for _, item := range items {
 		item.Source = "tailscale"
-		if item.AuthMode == "" {
-			item.AuthMode = "password"
+		item.AuthMode = "password"
+		item.KeyPath = ""
+		item = devices.Normalize(item)
+
+		existing, ok := s.getDeviceLocked(item.ID)
+		if !ok {
+			existing, ok = s.findTailnetDeviceLocked(item)
+			if ok {
+				item.ID = existing.ID
+				if item.User == "" || item.User == "root" {
+					item.User = existing.User
+				}
+				if item.Port == 0 || item.Port == 22 {
+					item.Port = existing.Port
+				}
+			}
 		}
-		if existing, ok := s.GetDevice(item.ID); ok {
+		if ok {
+			item.CreatedAt = existing.CreatedAt
 			item.Favorite = existing.Favorite
 			item.Notes = existing.Notes
 		}
-		if _, err := s.UpsertDevice(item); err != nil {
+		if err := s.upsertDeviceLocked(item); err != nil {
+			return err
+		}
+	}
+	return s.dedupeTailscaleDevicesLocked()
+}
+
+func (s *Store) UpdateTailscaleMetadata(items []devices.Device) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, item := range items {
+		existing, ok := s.getDeviceLocked(item.ID)
+		if !ok {
+			existing, ok = s.findTailnetDeviceLocked(item)
+		}
+		if !ok || existing.Source != "tailscale" {
+			continue
+		}
+		existing.Name = item.Name
+		existing.Host = item.Host
+		existing.TailscaleIP = item.TailscaleIP
+		existing.MagicDNS = item.MagicDNS
+		existing.Online = item.Online
+		existing.LastSeen = item.LastSeen
+		existing.Tags = item.Tags
+		existing.OS = item.OS
+		existing.Source = "tailscale"
+		existing.AuthMode = "password"
+		existing.KeyPath = ""
+		existing = devices.Normalize(existing)
+		if err := s.upsertDeviceLocked(existing); err != nil {
+			return err
+		}
+	}
+	return s.dedupeTailscaleDevicesLocked()
+}
+
+func (s *Store) findTailnetDeviceLocked(item devices.Device) (devices.Device, bool) {
+	if item.TailscaleIP != "" {
+		row := s.db.QueryRow(`SELECT id, name, host, tailscale_ip, magic_dns, user, port, auth_mode, key_path, source, online, last_seen, tags_json, os, favorite, notes, created_at, updated_at FROM devices WHERE source = 'tailscale' AND tailscale_ip = ?`, item.TailscaleIP)
+		if device, err := scanDevice(row); err == nil {
+			return device, true
+		}
+	}
+	if item.MagicDNS != "" {
+		row := s.db.QueryRow(`SELECT id, name, host, tailscale_ip, magic_dns, user, port, auth_mode, key_path, source, online, last_seen, tags_json, os, favorite, notes, created_at, updated_at FROM devices WHERE source = 'tailscale' AND magic_dns = ?`, item.MagicDNS)
+		if device, err := scanDevice(row); err == nil {
+			return device, true
+		}
+	}
+	return devices.Device{}, false
+}
+
+func (s *Store) DedupeTailscaleDevices() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dedupeTailscaleDevicesLocked()
+}
+
+func (s *Store) dedupeTailscaleDevicesLocked() error {
+	rows, err := s.db.Query(`SELECT id, name, host, tailscale_ip, magic_dns, user, port, auth_mode, key_path, source, online, last_seen, tags_json, os, favorite, notes, created_at, updated_at FROM devices WHERE source = 'tailscale'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var items []devices.Device
+	for rows.Next() {
+		device, err := scanDevice(rows)
+		if err != nil {
+			return err
+		}
+		items = append(items, device)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	groups := groupTailnetDuplicates(items)
+	for _, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+		canonical := group[0]
+		for _, candidate := range group[1:] {
+			if preferTailnetDevice(candidate, canonical) {
+				canonical = candidate
+			}
+		}
+		for _, item := range group {
+			if item.ID == canonical.ID {
+				continue
+			}
+			canonical = mergeTailnetDevice(canonical, item)
+		}
+		canonical.Source = "tailscale"
+		canonical.AuthMode = "password"
+		canonical.KeyPath = ""
+		canonical = devices.Normalize(canonical)
+		for _, item := range group {
+			if item.ID == canonical.ID {
+				continue
+			}
+			if _, err := s.db.Exec(`DELETE FROM devices WHERE id = ?`, item.ID); err != nil {
+				return err
+			}
+		}
+		if err := s.upsertDeviceLocked(canonical); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func groupTailnetDuplicates(items []devices.Device) [][]devices.Device {
+	type group struct {
+		devices []devices.Device
+		keys    map[string]struct{}
+	}
+	var groups []group
+	for _, item := range items {
+		keys := tailnetIdentityKeys(item)
+		if len(keys) == 0 {
+			groups = append(groups, group{devices: []devices.Device{item}, keys: map[string]struct{}{}})
+			continue
+		}
+
+		matches := []int{}
+		for i := range groups {
+			for _, key := range keys {
+				if _, ok := groups[i].keys[key]; ok {
+					matches = append(matches, i)
+					break
+				}
+			}
+		}
+
+		if len(matches) == 0 {
+			next := group{devices: []devices.Device{item}, keys: map[string]struct{}{}}
+			for _, key := range keys {
+				next.keys[key] = struct{}{}
+			}
+			groups = append(groups, next)
+			continue
+		}
+
+		target := matches[0]
+		groups[target].devices = append(groups[target].devices, item)
+		for _, key := range keys {
+			groups[target].keys[key] = struct{}{}
+		}
+		for i := len(matches) - 1; i >= 1; i-- {
+			idx := matches[i]
+			groups[target].devices = append(groups[target].devices, groups[idx].devices...)
+			for key := range groups[idx].keys {
+				groups[target].keys[key] = struct{}{}
+			}
+			groups = append(groups[:idx], groups[idx+1:]...)
+		}
+	}
+
+	out := make([][]devices.Device, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, group.devices)
+	}
+	return out
+}
+
+func tailnetIdentityKeys(device devices.Device) []string {
+	var keys []string
+	add := func(prefix, value string) {
+		value = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(value, ".")))
+		if value != "" {
+			keys = append(keys, prefix+value)
+		}
+	}
+	add("ip:", device.TailscaleIP)
+	add("dns:", device.MagicDNS)
+	if isTailscaleIP(device.Host) {
+		add("ip:", device.Host)
+	} else if looksLikeMagicDNS(device.Host) {
+		add("dns:", device.Host)
+	}
+	return keys
+}
+
+func preferTailnetDevice(candidate, current devices.Device) bool {
+	candidateScore := tailnetDeviceScore(candidate)
+	currentScore := tailnetDeviceScore(current)
+	if candidateScore != currentScore {
+		return candidateScore > currentScore
+	}
+	return candidate.UpdatedAt.After(current.UpdatedAt)
+}
+
+func tailnetDeviceScore(device devices.Device) int {
+	score := 0
+	if device.Host != "" && device.TailscaleIP != "" && device.Host == device.TailscaleIP {
+		score += 100
+	} else if isTailscaleIP(device.Host) {
+		score += 90
+	}
+	if device.TailscaleIP != "" {
+		score += 20
+	}
+	if device.MagicDNS != "" {
+		score += 10
+	}
+	if device.Online {
+		score += 5
+	}
+	return score
+}
+
+func mergeTailnetDevice(canonical, duplicate devices.Device) devices.Device {
+	if canonical.Name == "" {
+		canonical.Name = duplicate.Name
+	}
+	if canonical.Host == "" || (!isTailscaleIP(canonical.Host) && isTailscaleIP(duplicate.Host)) {
+		canonical.Host = duplicate.Host
+	}
+	if canonical.TailscaleIP == "" {
+		canonical.TailscaleIP = duplicate.TailscaleIP
+	}
+	if canonical.MagicDNS == "" {
+		canonical.MagicDNS = duplicate.MagicDNS
+	}
+	if (canonical.User == "" || canonical.User == "root") && duplicate.User != "" {
+		canonical.User = duplicate.User
+	}
+	if (canonical.Port == 0 || canonical.Port == 22) && duplicate.Port != 0 {
+		canonical.Port = duplicate.Port
+	}
+	if canonical.OS == "" {
+		canonical.OS = duplicate.OS
+	}
+	canonical.Favorite = canonical.Favorite || duplicate.Favorite
+	if canonical.Notes == "" {
+		canonical.Notes = duplicate.Notes
+	}
+	if duplicate.Online {
+		canonical.Online = true
+	}
+	if duplicate.LastSeen.After(canonical.LastSeen) {
+		canonical.LastSeen = duplicate.LastSeen
+	}
+	if canonical.CreatedAt.IsZero() || (!duplicate.CreatedAt.IsZero() && duplicate.CreatedAt.Before(canonical.CreatedAt)) {
+		canonical.CreatedAt = duplicate.CreatedAt
+	}
+	canonical.Tags = mergeTags(canonical.Tags, duplicate.Tags)
+	return canonical
+}
+
+func mergeTags(left, right []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, tag := range append(left, right...) {
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	return out
+}
+
+func isTailscaleIP(value string) bool {
+	ip := net.ParseIP(strings.TrimSpace(value))
+	if ip == nil {
+		return false
+	}
+	_, cgnat, _ := net.ParseCIDR("100.64.0.0/10")
+	return cgnat.Contains(ip)
+}
+
+func looksLikeMagicDNS(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(value, ".")))
+	return strings.Contains(value, ".tail")
 }
 
 func (s *Store) TrustKnownHost(host KnownHost) (KnownHost, error) {

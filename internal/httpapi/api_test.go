@@ -96,8 +96,7 @@ func TestSelectiveTailscaleImport(t *testing.T) {
 	cookie := setupTestSession(t, mux)
 
 	res := doJSON(t, mux, http.MethodPost, "/api/tailscale/import", map[string]any{
-		"defaultUser":     "drake",
-		"defaultAuthMode": "password",
+		"defaultUser": "drake",
 		"devices": []map[string]any{
 			{"id": "server-1", "user": "ubuntu", "port": 2222},
 		},
@@ -115,6 +114,29 @@ func TestSelectiveTailscaleImport(t *testing.T) {
 	}
 	if _, ok := s.GetDevice("nas-1"); ok {
 		t.Fatal("did not expect unselected device to be imported")
+	}
+}
+
+func TestRateLimiterIgnoresForwardedForUnlessTrusted(t *testing.T) {
+	api := &API{}
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
+	req.RemoteAddr = "192.0.2.44:1234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.1")
+
+	for i := 0; i < 8; i++ {
+		if !api.allowLoginAttempt(req) {
+			t.Fatalf("attempt %d unexpectedly denied", i+1)
+		}
+	}
+
+	req.Header.Set("X-Forwarded-For", "198.51.100.2")
+	if api.allowLoginAttempt(req) {
+		t.Fatal("expected forwarded-for rotation to be ignored without TrustProxy")
+	}
+
+	trusted := &API{TrustProxy: true}
+	if !trusted.allowLoginAttempt(req) {
+		t.Fatal("expected trusted proxy mode to key by X-Forwarded-For")
 	}
 }
 

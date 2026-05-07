@@ -9,9 +9,7 @@
   export let user = '';
   export let pass = '';
   export let port = 22;
-  export let authMode = 'password';
-  export let keyPath = '';
-  export let passphrase = '';
+  export let deviceId = '';
 
   let terminalContainer;
   let term;
@@ -58,6 +56,10 @@
       setConnectionState('error', 'Host and user are required.');
       return;
     }
+    if (!pass) {
+      setConnectionState('error', 'Password is required.');
+      return;
+    }
 
     if (socket && socket.readyState !== WebSocket.CLOSED) {
       socket.close();
@@ -78,7 +80,7 @@
         setConnectionState('error', 'SSH connection timed out.');
         socket?.close();
       }
-    }, 15000);
+    }, 18000);
     
     socket = new WebSocket(wsUrl);
 
@@ -86,6 +88,7 @@
       const dimensions = getDimensions();
       socket.send(JSON.stringify({
         type: 'connect',
+        deviceId,
         host,
         user,
         port: Number(port) || 22,
@@ -125,13 +128,9 @@
   }
 
   function authPayload() {
-    const type = authMode || (pass ? 'password' : 'agent');
     return {
-      type,
-      password: type === 'password' ? (pass || '') : '',
-      keyPath: type === 'key' ? (keyPath || '') : '',
-      passphrase: type === 'key' ? (passphrase || '') : '',
-      useAgent: type === 'agent'
+      type: 'password',
+      password: pass || ''
     };
   }
 

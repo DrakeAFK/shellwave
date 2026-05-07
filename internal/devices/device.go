@@ -53,6 +53,10 @@ func Normalize(d Device) Device {
 	if d.AuthMode == "" {
 		d.AuthMode = "password"
 	}
+	if d.AuthMode != "password" {
+		d.AuthMode = "password"
+	}
+	d.KeyPath = ""
 	if d.CreatedAt.IsZero() {
 		d.CreatedAt = now
 	}

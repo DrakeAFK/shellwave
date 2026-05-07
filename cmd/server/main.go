@@ -5,6 +5,7 @@ import (
 	"flag"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -65,6 +66,19 @@ func handleWS(appStore *store.Store, api *httpapi.API) http.HandlerFunc {
 			writer.writeJSON(wsproto.Error(err.Error()))
 			return
 		}
+		if connect.DeviceID == "" {
+			writer.writeJSON(wsproto.Error("device id is required"))
+			return
+		}
+		device, ok := appStore.GetDevice(connect.DeviceID)
+		if !ok {
+			writer.writeJSON(wsproto.Error("device not found"))
+			return
+		}
+		connect.Host = device.SSHHost()
+		connect.User = device.User
+		connect.Port = device.Port
+		connect.Auth.Type = "password"
 		port := connect.Port
 		if port == 0 {
 			port = 22
@@ -89,7 +103,7 @@ func handleWS(appStore *store.Store, api *httpapi.API) http.HandlerFunc {
 			HostKeyCallback: ssh.HostKeyCallback(appStore, connect.Host, port),
 			Cols:            connect.Cols,
 			Rows:            connect.Rows,
-			Timeout:         12 * time.Second,
+			Timeout:         15 * time.Second,
 		})
 		if err != nil {
 			writer.writeJSON(wsproto.Status(wsproto.StateError))
@@ -107,7 +121,6 @@ func handleWS(appStore *store.Store, api *httpapi.API) http.HandlerFunc {
 			_ = session.Resize(connect.Cols, connect.Rows)
 		}
 
-		done := make(chan struct{})
 		go func() {
 			_, _ = io.Copy(&terminalOutputWriter{writer: writer}, session.Stdout)
 		}()
@@ -115,7 +128,6 @@ func handleWS(appStore *store.Store, api *httpapi.API) http.HandlerFunc {
 			_, _ = io.Copy(&terminalOutputWriter{writer: writer}, session.Stderr)
 		}()
 		go func() {
-			defer close(done)
 			code := 0
 			if err := session.Wait(); err != nil {
 				var exitErr *sshlib.ExitError
@@ -131,16 +143,10 @@ func handleWS(appStore *store.Store, api *httpapi.API) http.HandlerFunc {
 		}()
 
 		for {
-			select {
-			case <-done:
-				writer.writeJSON(wsproto.Status(wsproto.StateDisconnected))
-				return
-			default:
-			}
-
 			msg, err := readClientMessage(conn)
 			if err != nil {
-				break
+				session.Close()
+				return
 			}
 			switch msg.Type {
 			case wsproto.ClientTypeInput:
@@ -155,7 +161,6 @@ func handleWS(appStore *store.Store, api *httpapi.API) http.HandlerFunc {
 				writer.writeJSON(wsproto.Error("unsupported message type: " + msg.Type))
 			}
 		}
-		writer.writeJSON(wsproto.Status(wsproto.StateDisconnected))
 	}
 }
 
@@ -236,7 +241,7 @@ func friendlySSHError(err error) string {
 func allowWebSocketOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return true
+		return isLocalRequest(r)
 	}
 	parsed, err := url.Parse(origin)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -246,13 +251,41 @@ func allowWebSocketOrigin(r *http.Request) bool {
 		return true
 	}
 	normalized := strings.TrimRight(origin, "/")
-	if _, ok := defaultDevOrigins()[normalized]; ok {
-		return true
+	if isDevMode() || isLocalHostPort(r.Host) {
+		if _, ok := defaultDevOrigins()[normalized]; ok {
+			return true
+		}
 	}
 	if _, ok := configuredOrigins()[normalized]; ok {
 		return true
 	}
 	return false
+}
+
+func isDevMode() bool {
+	return strings.EqualFold(os.Getenv("SHELLWAVE_DEV"), "true")
+}
+
+func isLocalHostPort(hostPort string) bool {
+	host := hostPort
+	if parsedHost, _, err := net.SplitHostPort(hostPort); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isLocalRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func defaultDevOrigins() map[string]struct{} {
@@ -326,6 +359,7 @@ func main() {
 		Store:             appStore,
 		AllowPublicHosts:  allowPublicHosts,
 		AllowedExtraHosts: allowedExtraHosts,
+		TrustProxy:        strings.EqualFold(os.Getenv("SHELLWAVE_TRUST_PROXY"), "true"),
 	}
 	mux.HandleFunc("/ws", handleWS(appStore, api))
 	mux.HandleFunc("/ws/terminal", handleWS(appStore, api))

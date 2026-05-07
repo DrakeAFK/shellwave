@@ -11,11 +11,15 @@ func TestAllowWebSocketOrigin(t *testing.T) {
 		host   string
 		origin string
 		env    string
+		remote string
 		want   bool
 	}{
 		{name: "same origin", host: "shellwave.local:4000", origin: "http://shellwave.local:4000", want: true},
 		{name: "vite dev", host: "localhost:4000", origin: "http://localhost:5173", want: true},
+		{name: "vite dev rejected for nonlocal backend", host: "shellwave.local:4000", origin: "http://localhost:5173", want: false},
 		{name: "configured", host: "shellwave.local:4000", origin: "https://ops.example.com", env: "https://ops.example.com", want: true},
+		{name: "empty local origin", host: "localhost:4000", remote: "127.0.0.1:53000", want: true},
+		{name: "empty nonlocal origin", host: "shellwave.local:4000", remote: "192.0.2.10:53000", want: false},
 		{name: "external", host: "shellwave.local:4000", origin: "https://evil.example.com", want: false},
 		{name: "bad origin", host: "shellwave.local:4000", origin: "://bad", want: false},
 	}
@@ -23,7 +27,7 @@ func TestAllowWebSocketOrigin(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("SHELLWAVE_ALLOWED_ORIGINS", tt.env)
-			req := &http.Request{Host: tt.host, Header: http.Header{}}
+			req := &http.Request{Host: tt.host, Header: http.Header{}, RemoteAddr: tt.remote}
 			if tt.origin != "" {
 				req.Header.Set("Origin", tt.origin)
 			}
